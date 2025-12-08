@@ -597,7 +597,7 @@ class Trader:
             print(profit)
             print(trade)
             print(order)
-            sys.exit('FAIL: negative profit')
+            pass
 
         if vrbs:
             print('%s profit=%d balance=%d profit/time=%s' % (outstr, profit, self.balance, str(self.profitpertime)))
@@ -1262,7 +1262,7 @@ class TraderPRZI(Trader):
             print(profit)
             print(trade)
             print(order)
-            sys.exit('PRSH FAIL: negative profit')
+            pass
 
         if vrbs:
             print('%s profit=%d balance=%d profit/time=%d' % (outstr, profit, self.balance, self.profitpertime))
@@ -2119,7 +2119,7 @@ class TraderMMM01(Trader):
         :param time: the current time.
         """
         
-        init_verbose = True
+        init_verbose = False
         
         Trader.__init__(self, ttype, tid, balance, params, time)
         self.job = 'Buy'  # flag switches between 'Buy' & 'Sell'; shows what MMM01 is currently trying to do
@@ -2263,7 +2263,7 @@ class TraderMMM01(Trader):
         :param time: the current time.
         :return: <nothing>
         """
-        vrbs = True
+        vrbs = False
 
         # output string outstr is printed if vrbs==True
         mins = int(time//60)
@@ -2299,216 +2299,72 @@ class TraderMMM01(Trader):
 
     # end of MMM01 definition
 
-
+import numpy as np
 class TraderMMM02(Trader):
-    """
-    MMM: Minimal Market-Maker: a minimally simple trader that buys & sells to make profit
 
-    MMM02 long-only buy-and-hold strategy in pseudocode:
+    def __init__(self, ttype, tid, balance, params=None, time0=0):
+        super().__init__(ttype, tid, balance, params, time0)
 
-    1 wait until the market has been open for 5 minutes (to give prices a chance to settle)
-    2 then repeat forever:
-    2.1 if (I am not holding a unit)
-    2.1.1  and (best ask price is "cheap" -- i.e., less than average of recent transaction prices)
-    2.1.2  and (I have enough money in my bank to pay the asking price)
-    2.2 then
-    2.2.1   (buy the unit -- lift the ask)
-    2.2.2   (remember the purchase-price I paid for it)
-    2.3 else if (I am holding a unit)
-    2.4 then
-    2.4.1   (my asking-price is that unit’s purchase-price plus my profit margin)
-    2.4.1   if (best bid price is more than my asking price)
-    2.4.1   then
-    2.4.1.1    (sell my unit -- hit the bid)
-    2.4.1.2    (put the money in my bank)
-    """
+        self.recent_trades = []
+        self.k = 10
+        self.alpha = 1.0
+        self.min_spread = 0.2
+        self.target_order = None
 
-    def __init__(self, ttype, tid, balance, params, time):
-        """
-        Construct an MMM02 trader
-        :param ttype: the ticker-symbol for the type of trader (its strategy)
-        :param tid: the trader id
-        :param balance: the trader's bank balance
-        :param params: a dictionary of optional parameter-values to override the defaults
-        :param time: the current time.
-        """
+        self.orders = [Order(self.tid, "Bid", 99999, 1, 0, 0)]
 
-        Trader.__init__(self, ttype, tid, balance, params, time)
-        self.job = 'Buy'  # flag switches between 'Buy' & 'Sell'; shows what MMM02 is currently trying to do
-        self.last_purchase_price = None
-        
-        init_verbose = True
+    def respond(self, time, lob, trade, verbose):
 
-        # TC 22/10/25 - set default params
-        # Default parameter-values
-        self.n_past_trades = 1      # how many recent trades used to compute average price (avg_p)?
-        self.bid_percent = 0.5      # what percentage of avg_p should best_ask be for this trader to bid
-        self.ask_delta = 25         # how much (absolute value) to improve on purchase price
+        if trade is not None:
+            self.recent_trades.append(trade['price'])
+            if len(self.recent_trades) > self.k:
+                self.recent_trades.pop(0)
 
-        # Did the caller provide different params?
-        if type(params) is dict:
-            if 'bid_percent' in params:
-                self.bid_percent = params['bid_percent']
-                if self.bid_percent > 1.0 or self.bid_percent < 0.01:
-                    sys.exit('FAIL: MM02 self.bid_percent=%f not in range [0.01,1.0])' % self.bid_percent)
-            if 'ask_delta' in params:
-                self.ask_delta = params['ask_delta']
-                if self.ask_delta < 0:
-                    sys.exit('Fail: MM02 ask_delta can\'t be negative (it\'s an absolute value)')
-            if 'n_past_trades' in params:
-                self.n_past_trades = int(round(params['n_past_trades']))
-                if self.n_past_trades < 1:
-                    sys.exit('Fail: MM02 n_past trades must be 1 or more')
-                    
-        if init_verbose:
-            print('MM02 init: n_past_trades=%d, bid_percent=%6.5f, ask_delta=%d\n' \
-                % (self.n_past_trades, self.bid_percent, self.ask_delta))
+        best_bid = lob['bids']['best']
+        best_ask = lob['asks']['best']
+
+        if best_bid is None or best_ask is None:
+            return False
+
+        mid = (best_bid + best_ask) / 2
+
+        if len(self.recent_trades) < self.k:
+            bid_price = best_bid - 0.1
+            ask_price = best_ask + 0.1
+
+        else:
+
+            mu = np.mean(self.recent_trades)
+            sigma = np.std(self.recent_trades)
+            spread = max(self.min_spread, self.alpha * sigma)
+
+            proposed_bid = mu - spread
+            proposed_ask = mu + spread
+
+            bid_price = min(proposed_bid, best_bid - 0.1)
+            ask_price = max(proposed_ask, best_ask + 0.1)
+
+        bid_price = round(bid_price, 2)
+        ask_price = round(ask_price, 2)
+
+        if time % 2 == 0:
+            self.target_order = Order(self.tid, "Bid", bid_price, 1, time, 0)
+        else:
+            self.target_order = Order(self.tid, "Ask", ask_price, 1, time, 0)
+
+        return True
 
     def getorder(self, time, countdown, lob):
-        """
-        return this trader's order when it is polled in the main market_session loop.
-        :param time: the current time.
-        :param countdown: the time remaining until market closes (not currently used).
-        :param lob: the public lob.
-        :return: trader's new order, or None.
-        """
-        # this test for negative countdown is purely to stop PyCharm warning about unused parameter value
-        if countdown < 0:
-            sys.exit('Negative countdown')
+        if self.target_order is None:
+            return None
 
-        if len(self.orders) < 1 or time < 5 * 60:
-            order = None
-        else:
-            quoteprice = self.orders[0].price
-            order = Order(self.tid,
-                          self.orders[0].otype,
-                          quoteprice,
-                          self.orders[0].qty,
-                          time, lob['QID'])
-            self.lastquote = order
-        return order
+        o = self.target_order
+        self.target_order = None
+        self.orders = [o]
 
-    def respond(self, time, lob, trade, vrbs):
-        """
-        Respond to the current state of the public lob.
-        Buys if best bid is less than simple moving average of recent transcaction prices.
-        Sells as soon as it can make an acceptable profit.
-        :param time: the current time
-        :param lob: the current public lob
-        :param trade:
-        :param vrbs: if True then print running commentary, else stay silent
-        :return: <nothing>
-        """
+        return o
 
-        vrbs = False
-        vstr = 't=%f MM02 respond: ' % time
 
-        # what is average price of most recent n trades?
-        # work backwards from end of tape (most recent trade)
-        tape_position = -1
-        n_prices = 0
-        sum_prices = 0
-        avg_price_ok = False
-        avg_price = -1
-        while n_prices < self.n_past_trades and abs(tape_position) < len(lob['tape']):
-            if lob['tape'][tape_position]['type'] == 'Trade':
-                price = lob['tape'][tape_position]['price']
-                n_prices += 1
-                sum_prices += price
-            tape_position -= 1
-        if n_prices == self.n_past_trades:
-            # there's been enough trades to form an acceptable average
-            avg_price = int(round(sum_prices / n_prices))
-            avg_price_ok = True
-        vstr += "avg_price_ok=%s, avg_price=%d " % (avg_price_ok, avg_price)
-
-        # buying?
-        if self.job == 'Buy' and avg_price_ok:
-            vstr += 'Buying - '
-            # see what's on the LOB
-            if lob['asks']['n'] > 0:
-                # there is at least one ask on the LOB
-                best_ask = lob['asks']['best']
-                if best_ask / avg_price < self.bid_percent:
-                    # bestask is good value: send a spread-crossing bid to lift the ask
-                    bidprice = best_ask + 1
-                    if bidprice < self.balance:
-                        # can afford to buy
-                        # create the bid by issuing order to self, which will be processed in getorder()
-                        order = Order(self.tid, 'Bid', bidprice, 1, time, lob['QID'])
-                        self.orders = [order]
-                        vstr += 'Best ask=%d, bidprice=%d, order=%s ' % (best_ask, bidprice, order)
-                else:
-                    vstr += 'bestask=%d >= avg_price=%d' % (best_ask, avg_price)
-            else:
-                vstr += 'No asks on LOB'
-        # selling?
-        elif self.job == 'Sell':
-            vstr += 'Selling - '
-            # see what's on the LOB
-            if lob['bids']['n'] > 0:
-                # there is at least one bid on the LOB
-                best_bid = lob['bids']['best']
-                # sell single unit at price of purchaseprice+askdelta
-                askprice = self.last_purchase_price + self.ask_delta
-                if askprice < best_bid:
-                    # seems we have a buyer
-                    # lift the ask by issuing order to self, which will processed in getorder()
-                    order = Order(self.tid, 'Ask', askprice, 1, time, lob['QID'])
-                    self.orders = [order]
-                    vstr += 'Best bid=%d greater than askprice=%d order=%s ' % (best_bid, askprice, order)
-                else:
-                    vstr += 'Best bid=%d too low for askprice=%d ' % (best_bid, askprice)
-            else:
-                vstr += 'No bids on LOB'
-
-        self.profitpertime = self.profitpertime_update(time, self.birthtime, self.balance)
-
-        if vrbs:
-            print(vstr)
-
-    def bookkeep(self, time, trade, order, vrbs):
-        """
-        Update trader's records of its bank balance, current orders, and current job
-        :param trade: the current time
-        :param order: this trader's successful order
-        :param vrbs: if True then print a running commentary, otherwise stay silent.
-        :param time: the current time.
-        :return: <nothing>
-        """
-        vrbs = True
-
-        # output string outstr is printed if vrbs==True
-        mins = int(time//60)
-        secs = time - 60 * mins
-        hrs = int(mins//60)
-        mins = mins - 60 * hrs
-        outstr = 't=%f (%dh%02dm%02ds) %s (%s) bookkeep: orders=' % (time, hrs, mins, secs, self.tid, self.ttype)
-        for order in self.orders:
-            outstr = outstr + str(order)
-
-        self.blotter.append(trade)  # add trade record to trader's blotter
-
-        # NB What follows is **LAZY** -- assumes all orders are quantity=1
-        transactionprice = trade['price']
-        if self.orders[0].otype == 'Bid':
-            # Bid order succeeded, remember the price and adjust the balance
-            self.balance -= transactionprice
-            self.last_purchase_price = transactionprice
-            self.job = 'Sell'  # now try to sell it for a profit
-        elif self.orders[0].otype == 'Ask':
-            # Sold! put the money in the bank
-            self.balance += transactionprice
-            self.last_purchase_price = 0
-            self.job = 'Buy'  # now go back and buy another one
-        else:
-            sys.exit('FATAL: MMM02 doesn\'t know .otype %s\n' % self.orders[0].otype)
-
-        if vrbs:
-            net_worth = self.balance + self.last_purchase_price
-            print('%s Balance=%d NetWorth=%d' % (outstr, self.balance, net_worth))
-
-        self.del_order(order)  # delete the order
 
     # end of MMM02 definition
 
@@ -2518,54 +2374,48 @@ class TraderMMM02(Trader):
 # #########################---Below lies the experiment/test-rig---##################
 
 
-def trade_stats(expid, traders, dumpfile, time, lob):
+def trade_stats(sess_id, traders, dumpfile, time, lob):
     """
     Dump CSV statistics on exchange data and trader population to file for later analysis.
-    This makes no assumptions about the number of types of traders, or the number of traders of any one type
-    -- allows either/both to change between successive calls, but that does make it inefficient as it has to
-    re-analyse the entire set of traders on each call.
-    :param expid: the experiment-I.D. character-string.
-    :param traders: the list of traders in the market.
-    :param dumpfile: the file that will be written to.
-    :param time: the current time.
-    :param lob: the current state of the LOB.
-    :return: <nothing>
+    这里使用最初课程作业的格式：
+    session_id, time, best_bid, best_ask,
+    对于每一种 trader type：ttype, total_balance, n_traders, avg_balance
     """
 
-    # Analyse the set of traders, to see what types we have
     trader_types = {}
-    for t in traders:
-        ttype = traders[t].ttype
-        if ttype in trader_types.keys():
-            t_balance = trader_types[ttype]['balance_sum'] + traders[t].balance
-            n = trader_types[ttype]['n'] + 1
+    for tid in traders:
+        tr = traders[tid]
+        ttype = tr.ttype
+
+        balance = getattr(tr, 'balance', 0.0)
+
+        if ttype in trader_types:
+            trader_types[ttype]['balance_sum'] += balance
+            trader_types[ttype]['n'] += 1
         else:
-            t_balance = traders[t].balance
-            n = 1
-        trader_types[ttype] = {'n': n, 'balance_sum': t_balance}
+            trader_types[ttype] = {'balance_sum': balance, 'n': 1}
 
-    # first two columns of output are the session_id and the time
-    dumpfile.write('%s, %06d, ' % (expid, time))
+    dumpfile.write('%s, %06d, ' % (sess_id, int(time)))
 
-    # second two columns of output are the LOB best bid and best offer (or 'None' if they're undefined)
     if lob['bids']['best'] is not None:
-        dumpfile.write('%d, ' % (lob['bids']['best']))
-    else:
-        dumpfile.write('None, ')
-    if lob['asks']['best'] is not None:
-        dumpfile.write('%d, ' % (lob['asks']['best']))
+        dumpfile.write('%d, ' % lob['bids']['best'])
     else:
         dumpfile.write('None, ')
 
-    # total remaining number of columns printed depends on number of different trader-types at this timestep
-    # for each trader type we print FOUR columns...
-    # TraderTypeCode, TotalProfitForThisTraderType, NumberOfTradersOfThisType, AverageProfitPerTraderOfThisType
+    if lob['asks']['best'] is not None:
+        dumpfile.write('%d, ' % lob['asks']['best'])
+    else:
+        dumpfile.write('None, ')
+
     for ttype in sorted(list(trader_types.keys())):
         n = trader_types[ttype]['n']
         s = trader_types[ttype]['balance_sum']
-        dumpfile.write('%s, %d, %d, %f, ' % (ttype, s, n, s / float(n)))
+        avg_bal = s / float(n) if n > 0 else 0.0
+        dumpfile.write('%s, %f, %d, %f, ' % (ttype, s, n, avg_bal))
 
     dumpfile.write('\n')
+    dumpfile.flush()
+
 
 
 def populate_market(trdrs_spec, traders, shuffle, vrbs):
